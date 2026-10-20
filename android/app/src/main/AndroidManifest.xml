@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-feature android:glEsVersion="0x00020000" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <!-- optional touch-control haptics (off by default) -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <application
+        android:label="${appLabel}"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:allowBackup="false"
+        android:hardwareAccelerated="true">
+
+        <!-- The launcher (Phase 3G: a dark HUD look drawn in code, LauncherUi). Main process. singleTop, not singleTask: as the root of a task with the game
+             on top, a singleTask activity reopened from the home screen would clear (destroy) the game's activity. -->
+        <activity
+            android:name=".LauncherActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:theme="@android:style/Theme.Material.NoActionBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- The native runtime (SDL + port_main), one run per process: the host ends its process with exit. The Android
+             keyboard (touch KBD) slides over the game; the game picture never moves or resizes for it. -->
+        <activity
+            android:name=".NewDarkActivity"
+            android:process=":game"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
+            android:preferMinimalPostProcessing="true"
+            android:windowSoftInputMode="adjustNothing|stateHidden"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
+    </application>
+</manifest>

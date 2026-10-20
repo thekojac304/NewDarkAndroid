@@ -1,0 +1,95 @@
+// The app shell (android/README.md). Native libraries are built by ../build_native.py, not by Gradle: the recompiled
+// game is large and is lifted on the PC first. SDL's Java side comes straight from the SDL source tree.
+apply plugin: 'com.android.application'
+
+def repo = rootProject.file('..')
+def sdl2 = file(project.findProperty('sdl2.dir') ?: System.getenv('SDL2_SOURCE') ?: "${repo}/build/deps/SDL2")
+def nativeOut = file(project.findProperty('native.dir') ?: "${repo}/build/android")
+
+// A side-by-side build (-Pside=legacytest -Pside.label="Legacy test"): application ID local.newdarkandroid.ss2.<side>,
+// so it has its own data folders, launcher name and version suffix, and installs next to the regular app instead of
+// replacing it. Pair it with its own native libraries (-Pnative.dir=..., from build_native.py --build ...). Without
+// -Pside the app is built exactly as before.
+def side = project.findProperty('side') ?: ''
+def sideLabel = project.findProperty('side.label') ?: side
+if (side && !(side ==~ /[a-z][a-z0-9_]*/)) throw new GradleException("-Pside=${side}: use lower-case letters, digits and _")
+
+// What the recompiled game was generated from, so the launcher can check a game folder before copying or starting it:
+// SS2.exe "size:crc32" (host.c refuses any other file) and each recompiled module "name:SizeOfImage:ImageBase" (modules.c
+// skips another version). Read from build_native.py's generated sources; empty when they are missing (no check then).
+def gameIdentity = {
+    def gen = file("${nativeOut}/game/gen"), hd = new File(gen, 'nd/nd_hostdata.c'), exe = '', mods = []
+    if (hd.isFile()) {
+        def t = hd.text, s = t =~ /hd_exe_size = (\d+)u/, c = t =~ /hd_exe_crc = 0x([0-9a-f]+)u/
+        if (s.find() && c.find()) exe = "${s.group(1)}:${c.group(1)}"
+    }
+    (gen.listFiles() ?: []).sort().each { d ->
+        def f = new File(d, "${d.name}_moddata.c")
+        def m = f.isFile() ? (f.text =~ /_desc = \{ "([^"]+)", 0x[0-9a-f]+u, 0x([0-9a-f]+)u, 0x[0-9a-f]+u, 0x([0-9a-f]+)u/) : null
+        if (m?.find()) mods << "${m.group(1)}:${m.group(2)}:${m.group(3)}"
+    }
+    if (!exe) logger.warn("no ${hd}: the launcher will not check game folders' SS2.exe")
+    [exe, mods.join(',')]
+}()
+
+android {
+    namespace 'local.newdarkandroid.ss2'
+    compileSdk 34
+    ndkVersion '29.0.14206865'           // only to strip the prebuilt libraries' debug info when packaging
+
+    defaultConfig {
+        applicationId 'local.newdarkandroid.ss2'
+        minSdk 26
+        targetSdk 34
+        versionCode 17
+        versionName '0.1.0-beta.1'
+        ndk { abiFilters 'arm64-v8a' }
+        buildConfigField 'String', 'GAME_EXE', "\"${gameIdentity[0]}\""
+        buildConfigField 'String', 'GAME_MODULES', "\"${gameIdentity[1]}\""
+        buildConfigField 'String', 'SIDE_LABEL', "\"${sideLabel}\""
+        manifestPlaceholders = [appLabel: side ? "SS2 ${sideLabel}" : 'NewDark SS2']
+        if (side) { applicationIdSuffix ".${side}"; versionNameSuffix "-${side}" }
+    }
+
+    // Two builds of the same app (same package: one replaces the other and keeps its data):
+    //   dev  - everything: the game, the headless game, the conformance programs and their guest (diagnostics, tests)
+    //   play - what playing needs: the game and SDL (about half the size); the launcher hides the diagnostics
+    buildFeatures { buildConfig true }
+    flavorDimensions 'kind'
+    productFlavors {
+        dev { dimension 'kind'; buildConfigField 'boolean', 'DIAGNOSTICS', 'true' }
+        play { dimension 'kind'; versionNameSuffix '-play'; buildConfigField 'boolean', 'DIAGNOSTICS', 'false' }
+    }
+
+    sourceSets {
+        main {
+            java.srcDirs += "${sdl2}/android-project/app/src/main/java"
+            jniLibs.srcDirs = ["${nativeOut}/libs"]
+        }
+        dev { assets.srcDirs = ["${nativeOut}/assets"] }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+
+    lint { abortOnError false }
+}
+
+androidComponents {
+    onVariants(selector().all()) { v ->
+        if (v.flavorName == 'play')
+            ['libss2null.so', 'libss2conf.so', 'libss2conf_cr.so'].each { v.packaging.jniLibs.excludes.add("**/${it}") }
+    }
+}
+
+tasks.register('checkNativeInputs') {
+    doLast {
+        if (!file("${sdl2}/android-project/app/src/main/java/org/libsdl/app/SDLActivity.java").exists())
+            throw new GradleException("SDL 2 source not found at ${sdl2}: set SDL2_SOURCE or -Psdl2.dir")
+        if (!file("${nativeOut}/libs/arm64-v8a/libSDL2.so").exists())
+            throw new GradleException("native libraries not built: run python android/build_native.py first")
+    }
+}
+preBuild.dependsOn checkNativeInputs

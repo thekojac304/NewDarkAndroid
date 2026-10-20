@@ -3,7 +3,7 @@
 #   cmake -S port -B build/port -DPORT_GENERATED=<lifter output> [-DPORT_BACKEND=sdl2|null]
 #   cmake --build build/port
 #
-# PORT_GENERATED contains nd/ (SS2.exe) and mods/ (mods.c), plus ao/ sq/ lv/ fm/ for the recompiled DLLs when they
+# PORT_GENERATED contains nd/ (SS2.exe) and mods/ (mods.c), plus ao/ sq/ lv/ fm/ nv/ (and nv124/ etc., one per NVScript version) for the recompiled DLLs when they
 # were lifted. A port to a new platform adds a directory under backends/ and selects it with PORT_BACKEND.
 cmake_minimum_required(VERSION 3.16)
 project(ss2port C)
@@ -21,12 +21,15 @@ endif()
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif()
+if(ANDROID)       # the app loads the game from a shared library: reach the hot globals (M) directly, not through the GOT
+  set(CMAKE_C_VISIBILITY_PRESET hidden)
+endif()
 if(NOT CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
   message(FATAL_ERROR "the generated code needs GCC or Clang (it uses __builtin_setjmp and friends)")
 endif()
 
 # ---- the recompiled game (generated, unchanged between platforms)
-file(GLOB GEN_SRC ${PORT_GENERATED}/nd/*.c ${PORT_GENERATED}/ao/*.c ${PORT_GENERATED}/sq/*.c ${PORT_GENERATED}/lv/*.c ${PORT_GENERATED}/fm/*.c ${PORT_GENERATED}/mods/*.c)
+file(GLOB GEN_SRC ${PORT_GENERATED}/nd/*.c ${PORT_GENERATED}/ao/*.c ${PORT_GENERATED}/sq/*.c ${PORT_GENERATED}/lv/*.c ${PORT_GENERATED}/fm/*.c ${PORT_GENERATED}/nv*/*.c ${PORT_GENERATED}/mods/*.c)   # nv*: every NVScript version built in (nv, nv124, ...)
 set(GEN_DEFS "")
 if(PORT_PREEMPT)
   list(APPEND GEN_DEFS RT_PREEMPT)
@@ -111,4 +114,29 @@ if(PORT_BACKEND STREQUAL "sdl2")
   if(WIN32)       # ship SDL2.dll next to the exe
     add_custom_command(TARGET ss2port POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL2::SDL2> $<TARGET_FILE_DIR:ss2port>)
   endif()
+endif()
+
+# ---- Android: the app loads the game as lib${PORT_ANDROID_LIB}.so and calls its SDL_main (backends/android/README.md).
+# The ss2port executable above stays for tests through adb (tests/run_conformance.py --target android).
+if(ANDROID)
+  set(PORT_ANDROID_LIB "main" CACHE STRING "Android: the shared library the app loads (lib<name>.so)")
+  file(GLOB ANDROID_SRC ${CMAKE_CURRENT_SOURCE_DIR}/backends/android/*.c)
+  add_library(${PORT_ANDROID_LIB} SHARED ${SYS_SRC} ${BACKEND_SRC} ${ANDROID_SRC} $<TARGET_OBJECTS:game>)
+  target_include_directories(${PORT_ANDROID_LIB} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_compile_definitions(${PORT_ANDROID_LIB} PRIVATE ${GEN_DEFS})
+  target_link_libraries(${PORT_ANDROID_LIB} PRIVATE portcore)
+  if(PORT_VIDEO)
+    target_link_libraries(${PORT_ANDROID_LIB} PRIVATE lavshim portcore)
+  endif()
+  target_link_libraries(${PORT_ANDROID_LIB} PRIVATE m Threads::Threads log)
+  if(PORT_BACKEND STREQUAL "sdl2")
+    target_link_libraries(${PORT_ANDROID_LIB} PRIVATE SDL2::SDL2)
+    # the touch controls (Shockolate's, GPL-3.0-or-later; backends/android/touch/README.md), reached through weak
+    # references in backends/sdl2/plat_sdl2.c
+    file(GLOB TOUCH_SRC ${CMAKE_CURRENT_SOURCE_DIR}/backends/android/touch/*.c)
+    target_sources(${PORT_ANDROID_LIB} PRIVATE ${TOUCH_SRC})
+    target_include_directories(${PORT_ANDROID_LIB} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/backends/android/touch)
+  endif()
+  # exit: record the status for the app and end the process with _exit; plat_log_write: logcat and the run log
+  target_link_options(${PORT_ANDROID_LIB} PRIVATE -Wl,--wrap=exit -Wl,--wrap=plat_log_write)
 endif()

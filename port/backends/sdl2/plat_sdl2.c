@@ -8,10 +8,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __linux__
+#include <unistd.h>
+#endif
 #define SDL_MAIN_HANDLED          /* our own main(): no SDL_main redirection on Windows */
 #include <SDL.h>
 #include "plat.h"
 #include "gl_render.h"
+#ifdef __ANDROID__   /* the touch controls (backends/android/touch/); weak: absent from builds without them */
+void android_touch_init(void) __attribute__((weak));
+int  android_touch_event(const SDL_Event *e) __attribute__((weak));
+int  android_touch_filter(const PlatEvent *p) __attribute__((weak));
+void android_touch_poll(void (*sink)(const PlatEvent *, void *), void *user, int dw, int dh, int bx, int by, int bw, int bh,
+                        int game_w, int game_h, int focused) __attribute__((weak));
+void android_touch_draw(int w, int h) __attribute__((weak));
+#define FORWARD(p) (!android_touch_filter || android_touch_filter(p))   /* a physical key/button touch does not already hold */
+#else
+#define FORWARD(p) 1
+#endif
 
 static SDL_Window *win; static SDL_GLContext ctx;
 static void port_log_plat_early(const char *m) { char b[200]; snprintf(b, sizeof b, "[sdl] %s", m); plat_log_write(PLAT_LOG_INFO, b); }
@@ -24,7 +38,69 @@ static void letterbox(int *x, int *y, int *w, int *h) {
     *w = (int)(surf_w * s + 0.5); *h = (int)(surf_h * s + 0.5); *x = (ww - *w) / 2; *y = (wh - *h) / 2;
 }
 void gl_present_rect(int *x, int *y, int *w, int *h, int *ww, int *wh) { letterbox(x, y, w, h); SDL_GL_GetDrawableSize(win, ww, wh); }
-void gl_swap(void) { SDL_GL_SwapWindow(win); }
+/* SS2PORT_PROFILE=1: every 5 s, one line with the frame rate, frame times (mean, median, 95th and 99th percentile, worst),
+   frames over 50 and 100 ms (stalls), the share of time spent in SwapWindow, the resident memory and the audio callbacks
+   (count, longest gap, peak level, silent buffers: does the mixer keep up and produce sound). A frame time is from
+   one swap to the next, so it includes everything the game did in between. */
+static void port_log_plat(const char *fmt, ...);
+static int prof_on = -1;
+static volatile uint32_t au_calls, au_silent, au_peak, au_gap_us;
+static void prof_frame(uint64_t t_before, uint64_t t_after) {
+    enum { N = 4096 }; static uint32_t ft[N]; static unsigned n; static uint64_t t0, last, swap_ns;
+    if (prof_on < 0) prof_on = getenv("SS2PORT_PROFILE") && atoi(getenv("SS2PORT_PROFILE"));
+    if (!prof_on) return;
+    swap_ns += t_after - t_before;
+    if (!t0) { t0 = last = t_after; return; }
+    if (n < N) ft[n++] = (uint32_t)((t_after - last) / 1000);           /* microseconds */
+    last = t_after;
+    if (t_after - t0 < 5000000000ull) return;
+    double dt = (double)(t_after - t0) / 1e9, sum = 0; unsigned over50 = 0, over100 = 0;
+    for (unsigned i = 1; i < n; i++) { uint32_t v = ft[i]; unsigned j = i; while (j && ft[j - 1] > v) { ft[j] = ft[j - 1]; j--; } ft[j] = v; }   /* a few hundred values */
+    for (unsigned i = 0; i < n; i++) { sum += ft[i]; over50 += ft[i] > 50000; over100 += ft[i] > 100000; }
+    long rss_kb = -1;
+#ifdef __linux__
+    { FILE *f = fopen("/proc/self/statm", "r"); long pages, res; if (f) { if (fscanf(f, "%ld %ld", &pages, &res) == 2) rss_kb = res * (sysconf(_SC_PAGESIZE) / 1024); fclose(f); } }
+#endif
+    port_log_plat("profile: %.1f fps | frame ms mean %.1f p50 %.1f p95 %.1f p99 %.1f max %.1f | >50ms %u >100ms %u | swap %.0f%% | rss %ld MB"
+                  " | audio %u callbacks, longest gap %.1f ms, peak %u, %u silent",
+                  n / dt, n ? sum / n / 1000 : 0, n ? ft[n / 2] / 1000.0 : 0, n ? ft[n * 95 / 100] / 1000.0 : 0, n ? ft[n * 99 / 100] / 1000.0 : 0,
+                  n ? ft[n - 1] / 1000.0 : 0, over50, over100, 100.0 * (double)swap_ns / (dt * 1e9), rss_kb / 1024,
+                  au_calls, au_gap_us / 1000.0, au_peak, au_silent);
+    t0 = t_after; n = 0; swap_ns = 0; au_calls = au_silent = au_peak = au_gap_us = 0;
+}
+/* SS2PORT_SHOT_DIR=<folder>: frame capture for tests and bug reports, of the picture as shown (bars and touch controls
+   included). Whenever <folder>/shot.req exists (looked for every 15 frames), the frame is written to
+   <folder>/shot_NNN.bmp at half size and shot.req is removed. It reads the GL back buffer, so it works whatever covers
+   the window (another app's overlay, a locked desktop). */
+static void shot_maybe(void) {
+    static const char *dir; static int init, n; static unsigned frame;
+    if (!init) { init = 1; dir = getenv("SS2PORT_SHOT_DIR"); }
+    if (!dir || ++frame % 15) return;
+    char path[1200]; snprintf(path, sizeof path, "%s/shot.req", dir);
+    FILE *f = fopen(path, "rb"); if (!f) return; fclose(f); remove(path);
+    typedef void (*ReadPixels)(int, int, int, int, unsigned, unsigned, void *);
+    ReadPixels rp = (ReadPixels)SDL_GL_GetProcAddress("glReadPixels");
+    int w, h; SDL_GL_GetDrawableSize(win, &w, &h);
+    uint8_t *px = rp && w > 1 && h > 1 ? malloc((size_t)w * h * 4) : NULL; if (!px) return;
+    rp(0, 0, w, h, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, px);
+    int ow = w / 2, oh = h / 2, stride = (ow * 3 + 3) & ~3; uint32_t size = 54u + (uint32_t)stride * oh;
+    uint8_t hd[54] = { 'B', 'M' }; memcpy(hd + 2, &size, 4); hd[10] = 54; hd[14] = 40; memcpy(hd + 18, &ow, 4); memcpy(hd + 22, &oh, 4);
+    hd[26] = 1; hd[28] = 24;
+    snprintf(path, sizeof path, "%s/shot_%03d.bmp", dir, n++);
+    if ((f = fopen(path, "wb"))) {             /* GL rows start at the bottom, as BMP rows do */
+        uint8_t *row = calloc(1, (size_t)stride); fwrite(hd, 1, 54, f);
+        for (int y = 0; y < oh; y++) { const uint8_t *s = px + (size_t)(2 * y) * w * 4; for (int x = 0; x < ow; x++) { row[3 * x] = s[8 * x + 2]; row[3 * x + 1] = s[8 * x + 1]; row[3 * x + 2] = s[8 * x]; } fwrite(row, 1, (size_t)stride, f); }
+        free(row); fclose(f); port_log_plat("frame capture: %s (%dx%d)", path, ow, oh);
+    }
+    free(px);
+}
+void gl_swap(void) {
+#ifdef __ANDROID__
+    if (android_touch_draw) { int dw, dh; SDL_GL_GetDrawableSize(win, &dw, &dh); android_touch_draw(dw, dh); }   /* over the picture and bars */
+#endif
+    shot_maybe();
+    uint64_t t = plat_time_ns(); SDL_GL_SwapWindow(win); prof_frame(t, plat_time_ns());
+}
 int gl_thread_spawn(void (*fn)(void *), void *arg) { return plat_thread_start(fn, arg, "render"); }
 /* GL set-up, run on the GL thread (the render thread, or this one) */
 typedef struct { int gles, ret, w, h; } GlSetup;
@@ -58,7 +134,9 @@ int plat_video_open(int w, int h, int fullscreen, const char *title) {
         }
         GlSetup g = { gles, 0, 0, 0 }; glt_call(gl_setup, &g);
         if (g.ret) return -1;
+#ifndef __ANDROID__                 /* on Android it would open the on-screen keyboard */
         SDL_StartTextInput();
+#endif
     } else {
         SDL_SetWindowFullscreen(win, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
         if (!fullscreen) { int cw, ch; SDL_GetWindowSize(win, &cw, &ch); if (cw < surf_w || ch < surf_h) SDL_SetWindowSize(win, surf_w, surf_h); }
@@ -79,10 +157,37 @@ void plat_video_set_title(const char *t) { if (win) SDL_SetWindowTitle(win, t); 
 static void port_log_plat(const char *fmt, ...) { char b[300]; int n = snprintf(b, sizeof b, "[sdl] "); va_list ap; va_start(ap, fmt); vsnprintf(b + n, sizeof b - (size_t)n, fmt, ap); va_end(ap); plat_log_write(PLAT_LOG_INFO, b); }
 static int warp_pending, warp_x, warp_y, skip_first_rel;   /* entering relative mode can report one huge jump (seen under WSLg: -2477,-638) */      /* the motion event our own warp produces is not player movement */
 static float mouse_scale = 1.0f, frac_x, frac_y;
+#ifdef __ANDROID__
+/* Android: SDL asks for pointer capture straight from this thread, and the view ignores a request while it still believes it
+   has capture. A release followed at once by a new request (the game frees and recaptures the mouse when it opens its
+   menu) therefore leaves the pointer uncaptured while SDL is in relative mode: hover positions then arrive as huge relative
+   motion. So shortly after every switch to relative mode, ask again through SDL's own reclaimRelativeMouseModeIfNeeded. */
+#include <jni.h>
+static uint64_t reclaim_at;
+static void android_reclaim_pointer(void) {
+    JNIEnv *env = (JNIEnv *)SDL_AndroidGetJNIEnv(); if (!env) return;
+    jobject activity = (jobject)SDL_AndroidGetActivity();          /* FindClass on this thread would not see the app's classes */
+    jclass act = activity ? (*env)->GetObjectClass(env, activity) : NULL;
+    jmethodID get = act ? (*env)->GetStaticMethodID(env, act, "getMotionListener", "()Lorg/libsdl/app/SDLGenericMotionListener_API12;") : NULL;
+    jobject ml = get ? (*env)->CallStaticObjectMethod(env, act, get) : NULL;
+    jclass mc = ml ? (*env)->GetObjectClass(env, ml) : NULL;
+    jmethodID re = mc ? (*env)->GetMethodID(env, mc, "reclaimRelativeMouseModeIfNeeded", "()V") : NULL;
+    if (re) (*env)->CallVoidMethod(env, ml, re);
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); port_log_plat("mouse: could not reclaim pointer capture"); }
+    if (mc) (*env)->DeleteLocalRef(env, mc);
+    if (ml) (*env)->DeleteLocalRef(env, ml);
+    if (act) (*env)->DeleteLocalRef(env, act);
+    if (activity) (*env)->DeleteLocalRef(env, activity);
+}
+#endif
 void plat_video_mouse_mode(int relative, int visible) {
     static int last = -1, rel_was; rel_mode = relative;
     if (!win) return;
-    int r = SDL_SetRelativeMouseMode(relative ? SDL_TRUE : SDL_FALSE); if (relative && !rel_was) skip_first_rel = 1; rel_was = relative; SDL_ShowCursor(visible && !relative ? SDL_ENABLE : SDL_DISABLE);
+    int r = SDL_SetRelativeMouseMode(relative ? SDL_TRUE : SDL_FALSE); if (relative && !rel_was) skip_first_rel = 1; SDL_ShowCursor(visible && !relative ? SDL_ENABLE : SDL_DISABLE);
+#ifdef __ANDROID__
+    if (relative && !rel_was) reclaim_at = plat_time_ns() + 300000000ull;     /* once the release has reached the view */
+#endif
+    rel_was = relative;
     if (relative != last) {        /* quiet unless capture failed or SS2PORT_MOUSE_DEBUG is set */
         last = relative;
         if (r || getenv("SS2PORT_MOUSE_DEBUG")) port_log_plat("mouse: %s%s%s", relative ? "captured (relative motion)" : "free", r ? " - SDL refused: " : "", r ? SDL_GetError() : "");
@@ -128,16 +233,42 @@ static uint32_t utf8_next(const char **p) {
     if (n) c &= 0x3F >> n; for (int i = 0; i < n && (*s & 0xC0) == 0x80; i++) c = (c << 6) | (*s++ & 0x3F);
     *p = (const char *)s; return c;
 }
+/* SS2PORT_INPUT_DEBUG=1: log every input, window and app event except mouse motion (SS2PORT_MOUSE_DEBUG logs that), up to 5000 lines */
+static void input_debug(const SDL_Event *e) {
+    static int dbg = -1; static unsigned n; if (dbg < 0) dbg = getenv("SS2PORT_INPUT_DEBUG") != NULL;
+    if (!dbg || n >= 5000) return;
+    switch (e->type) {
+    case SDL_KEYDOWN: case SDL_KEYUP: n++; port_log_plat("input: key %s scancode %d (%s) dik 0x%02x repeat %d", e->type == SDL_KEYDOWN ? "down" : "up", e->key.keysym.scancode, SDL_GetScancodeName(e->key.keysym.scancode), dik_of(e->key.keysym.scancode), e->key.repeat); break;
+    case SDL_TEXTINPUT: n++; port_log_plat("input: text \"%s\"", e->text.text); break;
+    case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP: n++; port_log_plat("input: mouse button %d %s at %d,%d%s", e->button.button, e->type == SDL_MOUSEBUTTONDOWN ? "down" : "up", e->button.x, e->button.y, e->button.which == SDL_TOUCH_MOUSEID ? " (from touch)" : ""); break;
+    case SDL_MOUSEWHEEL: n++; port_log_plat("input: wheel %d,%d", e->wheel.x, e->wheel.y); break;
+    case SDL_FINGERDOWN: case SDL_FINGERUP: n++; port_log_plat("input: finger %s at %.3f,%.3f", e->type == SDL_FINGERDOWN ? "down" : "up", e->tfinger.x, e->tfinger.y); break;
+    case SDL_WINDOWEVENT: n++; port_log_plat("input: window event %d (%d,%d)", e->window.event, e->window.data1, e->window.data2); break;
+    case SDL_APP_TERMINATING: case SDL_APP_WILLENTERBACKGROUND: case SDL_APP_DIDENTERBACKGROUND: case SDL_APP_WILLENTERFOREGROUND: case SDL_APP_DIDENTERFOREGROUND: n++; port_log_plat("input: app event 0x%x", e->type); break;
+    default: break;
+    }
+}
 void plat_video_poll(void (*sink)(const PlatEvent *, void *), void *user) {
     if (!win) return;
     SDL_Event e; PlatEvent p;
+#ifdef __ANDROID__
+    if (reclaim_at && plat_time_ns() >= reclaim_at) { reclaim_at = 0; if (rel_mode) android_reclaim_pointer(); }
+#endif
     while (SDL_PollEvent(&e)) {
-        memset(&p, 0, sizeof p);
+        memset(&p, 0, sizeof p); input_debug(&e);
+#ifdef __ANDROID__
+        if (android_touch_event && android_touch_event(&e)) continue;      /* a touch: the touch controls' (touch_ss2.c) */
+#endif
         switch (e.type) {
         case SDL_QUIT: p.type = PLAT_EV_QUIT; sink(&p, user); break;
+#ifdef __ANDROID__
+        /* the activity is being destroyed (finished, or cleared from its task): there is no window to come back to, and
+           the game would keep running without one, so end the process (port_exit flushes buffered file writes first) */
+        case SDL_APP_TERMINATING: { void port_exit(int code); port_log_plat("the Android activity is being destroyed: ending the game"); port_exit(0); break; }
+#endif
         case SDL_KEYDOWN: case SDL_KEYUP:
             if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_RETURN && (e.key.keysym.mod & KMOD_ALT)) { want_fullscreen = !want_fullscreen; SDL_SetWindowFullscreen(win, want_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0); break; }
-            p.type = PLAT_EV_KEY; p.down = e.type == SDL_KEYDOWN; p.repeat = e.key.repeat; p.key = dik_of(e.key.keysym.scancode); if (p.key) sink(&p, user); break;
+            p.type = PLAT_EV_KEY; p.down = e.type == SDL_KEYDOWN; p.repeat = e.key.repeat; p.key = dik_of(e.key.keysym.scancode); if (p.key && FORWARD(&p)) sink(&p, user); break;
         case SDL_TEXTINPUT: { const char *t = e.text.text; while (*t) { p.type = PLAT_EV_TEXT; p.text = utf8_next(&t); sink(&p, user); } break; }
         case SDL_MOUSEMOTION: {
             p.type = PLAT_EV_MOUSE_MOVE; to_surface(e.motion.x, e.motion.y, &p.x, &p.y);
@@ -150,7 +281,7 @@ void plat_video_poll(void (*sink)(const PlatEvent *, void *), void *user) {
             sink(&p, user); break; }
         case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP: {
             static const int map[6] = { -1, 0, 2, 1, 3, 4 }; int b = e.button.button < 6 ? map[e.button.button] : -1; if (b < 0) break;
-            p.type = PLAT_EV_MOUSE_BUTTON; p.down = e.type == SDL_MOUSEBUTTONDOWN; p.button = b; sink(&p, user); break; }
+            p.type = PLAT_EV_MOUSE_BUTTON; p.down = e.type == SDL_MOUSEBUTTONDOWN; p.button = b; if (FORWARD(&p)) sink(&p, user); break; }
         case SDL_MOUSEWHEEL: p.type = PLAT_EV_MOUSE_WHEEL; p.dy = (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -e.wheel.y : e.wheel.y) * 120; if (p.dy) sink(&p, user); break;
         case SDL_WINDOWEVENT:
             if (e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED || e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) { p.type = PLAT_EV_FOCUS; p.down = e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED; sink(&p, user); if (p.down && rel_mode) SDL_SetRelativeMouseMode(SDL_TRUE); }
@@ -158,11 +289,26 @@ void plat_video_poll(void (*sink)(const PlatEvent *, void *), void *user) {
             break;
         }
     }
+#ifdef __ANDROID__
+    if (android_touch_poll) {               /* the touch controls' events, after the platform's */
+        int bx, by, bw, bh, dw, dh; letterbox(&bx, &by, &bw, &bh); SDL_GL_GetDrawableSize(win, &dw, &dh);
+        android_touch_poll(sink, user, dw, dh, bx, by, bw, bh, surf_w, surf_h, (SDL_GetWindowFlags(win) & SDL_WINDOW_INPUT_FOCUS) != 0);
+    }
+#endif
 }
 
 /* ---------------------------------------------------------------- audio */
 static SDL_AudioDeviceID adev; static void (*afill)(int16_t *, int, void *); static void *auser;
-static void audio_cb(void *u, Uint8 *stream, int len) { (void)u; afill((int16_t *)stream, len / 4, auser); }
+/* audio statistics for the SS2PORT_PROFILE line (written by SDL's audio thread, read and reset by the game thread) */
+static uint64_t au_last;
+static void audio_cb(void *u, Uint8 *stream, int len) {
+    (void)u; afill((int16_t *)stream, len / 4, auser);
+    if (prof_on <= 0) return;
+    uint64_t t = plat_time_ns(); const int16_t *s = (const int16_t *)stream; int peak = 0;
+    for (int i = 0; i < len / 2; i++) { int v = s[i] < 0 ? -s[i] : s[i]; if (v > peak) peak = v; }
+    if (au_last && (t - au_last) / 1000 > au_gap_us) au_gap_us = (uint32_t)((t - au_last) / 1000);
+    au_last = t; au_calls++; if (!peak) au_silent++; if ((uint32_t)peak > au_peak) au_peak = (uint32_t)peak;
+}
 int plat_audio_open(int rate, void (*fill)(int16_t *, int, void *), void *user) {
     if (getenv("SS2PORT_NOSOUND") || SDL_InitSubSystem(SDL_INIT_AUDIO)) return 0;
     SDL_AudioSpec want = { 0 }, have; want.freq = rate; want.format = AUDIO_S16SYS; want.channels = 2; want.samples = 1024; want.callback = audio_cb;
@@ -177,12 +323,19 @@ void plat_audio_pause(int p) { if (adev) SDL_PauseAudioDevice(adev, p); }
 void plat_alert(const char *title, const char *text) { if (!getenv("SS2PORT_NOALERT")) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, title, text, win); }
 
 int port_main(int argc, char **argv);
+#ifdef __ANDROID__                  /* SDL calls SDL_main (backends/android/android_main.c), which runs this on its game thread */
+int plat_sdl2_main(int argc, char **argv) {
+#else
 int main(int argc, char **argv) {
+#endif
     /* SS2PORT_MOUSE_WARP=1: emulate captured mouse by re-centring the pointer (for systems without pointer capture,
        such as some remote desktops); SS2PORT_MOUSE_SCALE: multiply mouse motion (e.g. 0.5) */
     const char *mw = getenv("SS2PORT_MOUSE_WARP"); SDL_SetHint(SDL_HINT_MOUSE_RELATIVE_MODE_WARP, mw && *mw == '1' ? "1" : "0");
     const char *ms = getenv("SS2PORT_MOUSE_SCALE"); if (ms && atof(ms) > 0) mouse_scale = (float)atof(ms);
     SDL_SetMainReady();
+#ifdef __ANDROID__
+    if (android_touch_init) android_touch_init();   /* before SDL_Init: SDL must not turn touches into mouse events */
+#endif
     if (SDL_Init(0)) { fprintf(stderr, "SDL: %s\n", SDL_GetError()); return 1; }
     int r = port_main(argc, argv);
     SDL_Quit(); return r;

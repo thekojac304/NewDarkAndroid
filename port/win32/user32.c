@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include "core.h"
+#include "ss2game.h"
 
 InputState g_input;
 extern void kwait_set_msg_check(int (*fn)(void));
@@ -49,6 +50,7 @@ static int di_acquired, di_exclusive, captured;   /* pointer capture: see apply_
 static int cursor_null;                            /* SetCursor(NULL) also hides the pointer */
 static int32_t clip_l, clip_t, clip_r, clip_b;     /* ClipCursor rectangle (screen coordinates, right/bottom exclusive) */
 static int32_t vcur_x, vcur_y;                     /* while captured: the cursor the game sees, in screen coordinates */
+static int abs_sx = -1, abs_sy, abs_gx, abs_gy;    /* the last placement (PlatEvent.abs, surface pixels) and where it put the cursor */
 static int mouse_dbg(void) { static int d = -1; if (d < 0) d = getenv("SS2PORT_MOUSE_DEBUG") != NULL; return d; }   /* in time order with the backend's motion lines */
 static void vcur_clamp(void) {      /* the clip rectangle, or the screen when there is none (Windows never lets the cursor leave it) */
     int32_t l = 0, t = 0, r, b; int dw, dh; plat_video_display_size(&dw, &dh); r = dw; b = dh;
@@ -205,10 +207,14 @@ static void on_event(const PlatEvent *e, void *user) {
     case PLAT_EV_MOUSE_MOVE: {
         int gx, gy; to_game_coords(e->x, e->y, &gx, &gy);
         if (captured) {           /* the real pointer stays put: raw motion moves the cursor the game reads (it recentres it with SetCursorPos) */
-            Wnd *cw = W(g_input.hwnd); vcur_x += e->dx; vcur_y += e->dy; vcur_clamp();
-            gx = vcur_x - (cw ? cw->x : 0); gy = vcur_y - (cw ? cw->y : 0);
+            Wnd *cw = W(g_input.hwnd);
+            if (e->abs) { vcur_x = gx + (cw ? cw->x : 0); vcur_y = gy + (cw ? cw->y : 0); }   /* placed (touch): no motion for DirectInput */
+            else { vcur_x += e->dx; vcur_y += e->dy; }
+            vcur_clamp(); gx = vcur_x - (cw ? cw->x : 0); gy = vcur_y - (cw ? cw->y : 0);
         }
-        g_input.mouse_x = gx; g_input.mouse_y = gy; g_input.mouse_dx += e->dx; g_input.mouse_dy += e->dy;
+        g_input.mouse_x = gx; g_input.mouse_y = gy;
+        if (e->abs) { abs_sx = e->x; abs_sy = e->y; abs_gx = gx; abs_gy = gy; }
+        if (!e->abs) { g_input.mouse_dx += e->dx; g_input.mouse_dy += e->dy; }
         if (h) post(h, 0x200, mk_flags(), ((uint32_t)(gy & 0xFFFF) << 16) | (uint32_t)(gx & 0xFFFF));
         break; }
     case PLAT_EV_MOUSE_BUTTON: {
@@ -229,7 +235,92 @@ static void on_event(const PlatEvent *e, void *user) {
     }
     for (int i = 0; i < nlisteners; i++) listeners[i](e);
 }
-void input_pump(void) { plat_video_poll(on_event, NULL); }
+/* SS2PORT_INPUT_SCRIPT=<file>: input for tests, the same on every backend (null included), fed in as if it came from the
+ * platform. One command per line, at a time in milliseconds after the first presented frame (lines in time order):
+ *   <ms> down KEY | up KEY | tap KEY         KEY: a-z 0-9 esc enter space tab backspace lshift lctrl lalt minus semicolon
+ *                                             period comma slash f1-f12 up down left right, or a DirectInput code (0x39)
+ *   <ms> type TEXT                           a key press and its character per character (':' and '_' with shift), all at
+ *                                             once: fine for text fields, too fast for key bindings
+ *   <ms> char C                              only the character C (WM_CHAR); "char space" for a space
+ *   <ms> move DX DY | btn N down|up | click N    relative mouse motion, mouse button (1 left, 2 right, 3 middle)
+ *   <ms> place X Y                           put the game's cursor at pixel X, Y of the drawing surface (touch placement)
+ *   <ms> shot                                frame capture (SS2PORT_SHOT_DIR, backends/sdl2/plat_sdl2.c), taken within 15 frames
+ *   <ms> game ACTION                         a radial-menu action or state check (core/ss2game.c: dump, select WHEEL ID, string; test-only: cmd, give, take, grant_psi)
+ *   <ms> quit                                ends the process with exit code 0
+ * '#' starts a comment. Each command is logged. */
+typedef struct { uint32_t ms; char cmd[8]; char arg[64]; int a, b; } ScriptLine;
+static ScriptLine *script; static int script_n, script_i; static uint64_t script_t0;
+static int script_key(const char *k) {
+    static const struct { const char *n; int d; } t[] = { { "esc", 0x01 }, { "enter", 0x1C }, { "space", 0x39 }, { "tab", 0x0F }, { "backspace", 0x0E },
+        { "lshift", 0x2A }, { "lctrl", 0x1D }, { "lalt", 0x38 }, { "minus", 0x0C }, { "semicolon", 0x27 }, { "period", 0x34 }, { "comma", 0x33 },
+        { "slash", 0x35 }, { "up", 0xC8 }, { "down", 0xD0 }, { "left", 0xCB }, { "right", 0xCD } };
+    static const char letters[] = "qwertyuiop\0\0\0\0asdfghjkl\0\0\0\0\0zxcvbnm";     /* DIK 0x10 onwards */
+    if (k[0] && !k[1]) {
+        if (k[0] >= '1' && k[0] <= '9') return 0x02 + (k[0] - '1');
+        if (k[0] == '0') return 0x0B;
+        for (int i = 0; i < (int)sizeof letters - 1; i++) if (letters[i] && letters[i] == k[0]) return 0x10 + i;
+    }
+    if (k[0] == 'f' && k[1] >= '1' && k[1] <= '9') { int n = atoi(k + 1); if (n >= 1 && n <= 10) return 0x3A + n; if (n == 11) return 0x57; if (n == 12) return 0x58; }
+    if (k[0] == '0' && k[1] == 'x') return (int)strtol(k, NULL, 16);
+    for (size_t i = 0; i < sizeof t / sizeof *t; i++) if (!strcmp(k, t[i].n)) return t[i].d;
+    return 0;
+}
+static void script_load(void) {
+    static int done; if (done) return; done = 1;
+    const char *path = getenv("SS2PORT_INPUT_SCRIPT"); if (!path || !*path) return;
+    FILE *f = fopen(path, "r"); if (!f) { port_warn("input script %s: cannot open", path); return; }
+    char l[256]; int cap = 0;
+    while (fgets(l, sizeof l, f)) {
+        char *h = strchr(l, '#'); if (h) *h = 0;
+        ScriptLine s; memset(&s, 0, sizeof s); unsigned ms; int n = 0;
+        if (sscanf(l, "%u %7s %n", &ms, s.cmd, &n) < 2) continue;
+        s.ms = ms; char *rest = l + n; size_t rl = strlen(rest); while (rl && (rest[rl - 1] == '\n' || rest[rl - 1] == '\r')) rest[--rl] = 0;
+        snprintf(s.arg, sizeof s.arg, "%s", rest); sscanf(rest, "%d %d", &s.a, &s.b);
+        if (script_n == cap) { cap = cap ? cap * 2 : 64; script = realloc(script, (size_t)cap * sizeof *script); }
+        script[script_n++] = s;
+    }
+    fclose(f); port_log("input script %s: %d commands", path, script_n);
+}
+static void script_keyev(int dik, int down) { PlatEvent e; memset(&e, 0, sizeof e); e.type = PLAT_EV_KEY; e.key = dik; e.down = down; on_event(&e, NULL); }
+static void script_run(const ScriptLine *s) {
+    PlatEvent e; memset(&e, 0, sizeof e); char k[64] = ""; sscanf(s->arg, "%63s", k);
+    port_log("input script %u ms: %s %s", s->ms, s->cmd, s->arg);
+    if (!strcmp(s->cmd, "down") || !strcmp(s->cmd, "up") || !strcmp(s->cmd, "tap")) {
+        int d = script_key(k); if (!d) { port_warn("input script: unknown key %s", k); return; }
+        if (strcmp(s->cmd, "up")) script_keyev(d, 1);
+        if (strcmp(s->cmd, "down")) script_keyev(d, 0);
+    } else if (!strcmp(s->cmd, "type")) {
+        for (const char *p = s->arg; *p; p++) {
+            char one[2] = { (char)tolower((unsigned char)*p), 0 }; int shift = *p == ':' || *p == '_' || isupper((unsigned char)*p);
+            int d = *p == ':' ? 0x27 : *p == '_' ? 0x0C : *p == ' ' ? 0x39 : script_key(one);
+            if (shift) script_keyev(0x2A, 1);
+            if (d) script_keyev(d, 1);
+            e.type = PLAT_EV_TEXT; e.text = (uint32_t)(unsigned char)*p; on_event(&e, NULL);
+            if (d) script_keyev(d, 0);
+            if (shift) script_keyev(0x2A, 0);
+        }
+    } else if (!strcmp(s->cmd, "char")) { e.type = PLAT_EV_TEXT; e.text = !strcmp(k, "space") ? ' ' : (uint32_t)(unsigned char)k[0]; if (e.text) on_event(&e, NULL); }
+    else if (!strcmp(s->cmd, "move")) { e.type = PLAT_EV_MOUSE_MOVE; e.dx = s->a; e.dy = s->b; on_event(&e, NULL); }
+    else if (!strcmp(s->cmd, "place")) { e.type = PLAT_EV_MOUSE_MOVE; e.abs = 1; e.x = s->a; e.y = s->b; on_event(&e, NULL); }
+    else if (!strcmp(s->cmd, "btn") || !strcmp(s->cmd, "click")) {
+        static const int map[4] = { 0, 0, 1, 2 }; e.type = PLAT_EV_MOUSE_BUTTON; e.button = s->a >= 1 && s->a <= 3 ? map[s->a] : 0;
+        int click = !strcmp(s->cmd, "click");
+        if (click || strstr(s->arg, "down")) { e.down = 1; on_event(&e, NULL); }
+        if (click || strstr(s->arg, "up")) { e.down = 0; on_event(&e, NULL); }
+    } else if (!strcmp(s->cmd, "shot")) {
+        const char *d = getenv("SS2PORT_SHOT_DIR"); char p[1100]; FILE *f;
+        if (!d) port_warn("input script: shot needs SS2PORT_SHOT_DIR");
+        else { snprintf(p, sizeof p, "%s/shot.req", d); if ((f = fopen(p, "wb"))) fclose(f); }
+    } else if (!strcmp(s->cmd, "game")) ss2g_script(s->arg);      /* core/ss2game.c: radial menu actions and state checks */
+    else if (!strcmp(s->cmd, "quit")) port_exit(0);
+    else port_warn("input script: unknown command %s", s->cmd);
+}
+static void script_pump(void) {
+    script_load(); if (script_i >= script_n || !g_frames) return;
+    uint64_t now = plat_time_ns(); if (!script_t0) script_t0 = now;
+    while (script_i < script_n && (now - script_t0) / 1000000u >= script[script_i].ms) script_run(&script[script_i++]);
+}
+void input_pump(void) { script_pump(); plat_video_poll(on_event, NULL); }
 static int msg_waiting(void) { input_pump(); return qt != qh || quit_posted; }
 static int match(const QMsg *m, uint32_t h, uint32_t lo, uint32_t hi) { return (!h || m->hwnd == h) && ((!lo && !hi) || (m->msg >= lo && m->msg <= hi)); }
 /* takes (remove) or looks at the first queued message that matches into the guest MSG at p */
@@ -246,7 +337,7 @@ static int peek(uint32_t p, uint32_t h, uint32_t lo, uint32_t hi, int remove) {
     return 0;
 }
 static void ensure_hook(void) { static int done; if (!done) { done = 1; kwait_set_msg_check(msg_waiting); } }
-SHIM(PeekMessageA) { ensure_hook(); input_pump(); RET(peek(A(0), A(1), A(2), A(3), A(4) & 1)); }
+SHIM(PeekMessageA) { ensure_hook(); input_pump(); ss2g_message_pump(c); RET(peek(A(0), A(1), A(2), A(3), A(4) & 1)); }
 SHIM(GetMessageA) {
     ensure_hook();
     for (;;) {
@@ -321,7 +412,22 @@ SHIM(GetCursorPos) { input_pump();
     if (mouse_dbg()) { static int lx = -99999, ly; Wnd *w0 = W(g_input.hwnd); int x = captured ? vcur_x : g_input.mouse_x + (w0 ? w0->x : 0), y = captured ? vcur_y : g_input.mouse_y + (w0 ? w0->y : 0);
         if (x != lx || y != ly) { port_log("cursor: GetCursorPos -> %d,%d (from %08x)", x, y, RD32(c->esp)); lx = x; ly = y; } }
     if (captured) { WR32(A(0), (uint32_t)vcur_x); WR32(A(0) + 4, (uint32_t)vcur_y); RET(1); return; } Wnd *w = W(g_input.hwnd); WR32(A(0), (uint32_t)(g_input.mouse_x + (w ? w->x : 0))); WR32(A(0) + 4, (uint32_t)(g_input.mouse_y + (w ? w->y : 0))); RET(1); }
+/* When the game last moved the cursor itself. SS2 recentres it every frame in shoot (mouse look) mode and never in
+   interface mode or its menus, so this tells a backend which of the two the game is in (the Android touch controls). */
+static volatile uint64_t recentred_ns;
+uint64_t user32_cursor_recentred_ns(void) { return recentred_ns; }
+/* Where the cursor the game reads is, in the surface pixels of PlatEvent positions (the Android touch controls' relative
+   cursor starts there, so it goes on from where the game, a physical mouse or a direct touch left it). Unmoved since the
+   last placement: that placement exactly. Otherwise the window position mapped back, rounded up so that placing it there
+   gives the same window position (to_game_coords rounds down). Game thread only. */
+void user32_cursor_pos(int *x, int *y) {
+    if (abs_sx >= 0 && g_input.mouse_x == abs_gx && g_input.mouse_y == abs_gy) { *x = abs_sx; *y = abs_sy; return; }
+    Wnd *w = W(g_input.hwnd); int cw, ch; plat_video_window_size(&cw, &ch);
+    if (!w || w->w <= 0 || w->h <= 0 || cw <= 0 || ch <= 0) { *x = g_input.mouse_x; *y = g_input.mouse_y; return; }
+    *x = (int)(((int64_t)g_input.mouse_x * cw + w->w - 1) / w->w); *y = (int)(((int64_t)g_input.mouse_y * ch + w->h - 1) / w->h);
+}
 SHIM(SetCursorPos) {
+    recentred_ns = plat_time_ns();
     if (mouse_dbg()) port_log("cursor: SetCursorPos %d,%d (from %08x)%s", (int32_t)A(0), (int32_t)A(1), RD32(c->esp), captured ? " [captured]" : "");
     Wnd *w = W(g_input.hwnd);
     if (captured) { vcur_x = (int32_t)A(0); vcur_y = (int32_t)A(1); vcur_clamp(); g_input.mouse_x = vcur_x - (w ? w->x : 0); g_input.mouse_y = vcur_y - (w ? w->y : 0); RET(1); return; }   /* no real pointer move */
