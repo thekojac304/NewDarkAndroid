@@ -36,9 +36,9 @@ engine drew its 2D picture, and the touch bridge places the cursor through that 
 | Automated tests | Bridge suite **87/87** (76 + 11 new). Conformance in the app: 0/511 (default) and 0/511 (`--cache-regs --abi-check`). |
 | APK | `0.5.0-phase2b1` (versionCode 6), sha256 `9850e11ca452df86a113a78ec0d58e231250ca85b8a60b19c9eb3c62af507511`, installed on the S26 Ultra |
 
-![HUD before and after](phase2b1/hud-1280x720.jpg)
-![Inventory before and after](phase2b1/inventory-1280x720.jpg)
-![PDA before and after](phase2b1/pda-1280x720.jpg)
+![HUD before and after](https://github.com/thekojac304/NewDarkAndroid-development-history/raw/a19e829367204543dd6799fa819279f427377b2b/docs/android-audit/phase2b1/hud-1280x720.jpg)
+![Inventory before and after](https://github.com/thekojac304/NewDarkAndroid-development-history/raw/a19e829367204543dd6799fa819279f427377b2b/docs/android-audit/phase2b1/inventory-1280x720.jpg)
+![PDA before and after](https://github.com/thekojac304/NewDarkAndroid-development-history/raw/a19e829367204543dd6799fa819279f427377b2b/docs/android-audit/phase2b1/pda-1280x720.jpg)
 
 ## 1. Starting point and preservation
 
@@ -95,8 +95,8 @@ S26 Ultra with a profile `user.cfg` (copies only, Steam folder untouched):
 - Scaling at non-whole ratios is filtered (slightly soft), as NewDark documents. `d3d_disp_force_filter_scale2d` was
   not needed.
 
-![The four levels](phase2b1/levels-1280x720.jpg)
-![Below 640x480 is ignored](phase2b1/below-640x480-ignored.jpg)
+![The four levels](https://github.com/thekojac304/NewDarkAndroid-development-history/raw/a19e829367204543dd6799fa819279f427377b2b/docs/android-audit/phase2b1/levels-1280x720.jpg)
+![Below 640x480 is ignored](https://github.com/thekojac304/NewDarkAndroid-development-history/raw/a19e829367204543dd6799fa819279f427377b2b/docs/android-audit/phase2b1/below-640x480-ignored.jpg)
 
 At 4:3 resolutions the result is the same size: the interface takes 480 of the picture's lines.
 
@@ -107,7 +107,7 @@ At 4:3 resolutions the result is the same size: the interface takes 480 of the p
 | 1280×960 | 2.25 px (NewDark's own 2×) | 2.25 px |
 | 1920×1080 (not tested; computed) | 2.0 px (2×, 540 lines) | 2.25 px |
 
-![4:3 resolutions](phase2b1/resolution-4x3.jpg)
+![4:3 resolutions](https://github.com/thekojac304/NewDarkAndroid-development-history/raw/a19e829367204543dd6799fa819279f427377b2b/docs/android-audit/phase2b1/resolution-4x3.jpg)
 
 ## 3. Touch defect found: 4:3 menus at a wide resolution
 
@@ -131,7 +131,7 @@ the whole frame.
   A tap beside the menu goes to its edge. Nothing else in the bridge or the Shockolate core changed.
 - Taps in game, and at 4:3 resolutions in menus, are mapped exactly as in Phase 2A.
 
-![Menus](phase2b1/menus.jpg)
+![Menus](https://github.com/thekojac304/NewDarkAndroid-development-history/raw/a19e829367204543dd6799fa819279f427377b2b/docs/android-audit/phase2b1/menus.jpg)
 
 ## 4. Implementation
 

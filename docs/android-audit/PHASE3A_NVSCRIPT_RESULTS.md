@@ -18,7 +18,7 @@ engine calls into the module about 4,000–7,400 times every 20 s of play.
 | 5. Script classes register | Yes: the engine creates and calls NVScript script objects (first call into its code during mission load; thousands of calls) |
 | 6. Gameplay scripts execute correctly | Yes for what was tested: SCP's module gate opens only with the module (positive and negative runs, both platforms), the Earth lift ride, save and reload with the module re-initialised (PHASE3B_SCP_RESULTS.md). Not every NV script class SCP uses was exercised |
 
-![SCP gate with (top) and without (bottom) NVScript](phase3a/scp-gate-with-and-without-nvscript.jpg)
+![SCP gate with (top) and without (bottom) NVScript](https://github.com/thekojac304/NewDarkAndroid-development-history/raw/a19e829367204543dd6799fa819279f427377b2b/docs/android-audit/phase3a/scp-gate-with-and-without-nvscript.jpg)
 
 ## 1. The module
 

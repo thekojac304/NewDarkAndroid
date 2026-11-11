@@ -20,9 +20,9 @@ kept running underneath, which is how the frame captures below were made (§4).
 | A4 Acceptance tests | Host suites pass (169/169 bridge checks; Shockolate's six core suites). Device touch tests **blocked** (overlay). Gameplay, menus, inventory, PDA, save/load and the HUD were exercised on the device with scripted input instead (§4, and PHASE3B_SCP_RESULTS.md) |
 | APK | `0.6.0-phase2b2` (versionCode 7), sha256 `8673f4dcba26de0e4c21e34b08a32d80fec92667cabeb65d89755f36321e3053`, preserved in `build/android/baseline/phase2b2/`. The later `0.7.0-phase3a` APK contains the same touch code |
 
-![Menu, 1280x720](phase2b2/menu-1280x720.jpg)
-![Inventory, 1280x720](phase2b2/inventory-1280x720.jpg)
-![PDA, 1280x720](phase2b2/pda-1280x720.jpg)
+![Menu, 1280x720](https://github.com/thekojac304/NewDarkAndroid-development-history/raw/a19e829367204543dd6799fa819279f427377b2b/docs/android-audit/phase2b2/menu-1280x720.jpg)
+![Inventory, 1280x720](https://github.com/thekojac304/NewDarkAndroid-development-history/raw/a19e829367204543dd6799fa819279f427377b2b/docs/android-audit/phase2b2/inventory-1280x720.jpg)
+![PDA, 1280x720](https://github.com/thekojac304/NewDarkAndroid-development-history/raw/a19e829367204543dd6799fa819279f427377b2b/docs/android-audit/phase2b2/pda-1280x720.jpg)
 
 ## 1. Starting point and preservation
 

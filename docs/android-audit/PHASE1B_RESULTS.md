@@ -193,7 +193,7 @@ These are a regression check only. **They are not evidence for the app.** The in
 
 | Test screen after a run | Overlay during a run (`:game` process) |
 | --- | --- |
-| ![test screen](phase1b/test-screen.png) | ![run overlay](phase1b/run-overlay.png) |
+| ![test screen](https://github.com/thekojac304/NewDarkAndroid-development-history/raw/a19e829367204543dd6799fa819279f427377b2b/docs/android-audit/phase1b/test-screen.png) | ![run overlay](https://github.com/thekojac304/NewDarkAndroid-development-history/raw/a19e829367204543dd6799fa819279f427377b2b/docs/android-audit/phase1b/run-overlay.png) |
 
 ## 5. Issues found during the work
 

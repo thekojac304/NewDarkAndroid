@@ -212,7 +212,7 @@ The exported symbols are unchanged: `SDL_main` is still the only one. `libss2gam
 
 | | |
 | --- | --- |
-| Launcher after the runs (committed) | ![launcher](phase1c/launcher.png) |
+| Launcher after the runs (committed) | ![launcher](https://github.com/thekojac304/NewDarkAndroid-development-history/raw/a19e829367204543dd6799fa819279f427377b2b/docs/android-audit/phase1c/launcher.png) |
 | Intro cutscene at about 4 s, main menu at about 18 s, menu after Escape | `build/android/evidence/phase1c/game-4s.png`, `game-18s.png`, `game-after-esc.png` (git-ignored) |
 
 The game screenshots show the game's own copyrighted art, so they are **not committed**. They are 2340×1080 device

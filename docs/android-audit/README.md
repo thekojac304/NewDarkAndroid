@@ -1,5 +1,10 @@
 # Android port audit: executive summary
 
+> **Development record.** The files in this folder are phase reports written while the port was being built, kept
+> as written. Plans changed along the way: development and testing ended up on a Galaxy S26 Ultra, not a Pixel 10.
+> For the current state, see the [main README](../../README.md). The screenshots, logs and scripts the reports mention
+> are in [NewDarkAndroid-development-history](https://github.com/thekojac304/NewDarkAndroid-development-history/tree/release/v0.1.0-beta.1-prep/docs/android-audit).
+
 Phase 0 (audit and planning only), 2026-10-17. Target: System Shock 2 (NewDark 2.48) as a native Android ARM64 APK,
 first on the Google Pixel 10, with the existing Shockolate touch controls and support for pre-modded installs,
 especially SCP.
