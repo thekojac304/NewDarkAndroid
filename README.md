@@ -9,6 +9,17 @@
 
 <p align="center"><img src="docs/images/launcher.png" alt="The NewDark SS2 launcher" width="320"></p>
 
+## Download
+
+**[v0.1.0-beta.1 — SOURCE ONLY](https://github.com/thekojac304/NewDarkAndroid/releases/tag/v0.1.0-beta.1)**:
+`NewDarkAndroid-v0.1.0-beta.1-source.zip` / `.tar.gz` and `SHA256SUMS.txt`.
+
+There is **no installable APK**, and none can be published as things stand. An APK of this port contains System
+Shock 2's own program code, translated into C and compiled in. That code is copyrighted, so each player builds the
+APK on a PC from their own copy of the game ([docs/android/BUILDING.md](docs/android/BUILDING.md)). Building needs
+Python, a JDK and the Android SDK/NDK. A downloadable APK that does the translation on the phone itself is a planned,
+unfinished milestone.
+
 ## What this is, and what it is not
 
 System Shock 2's engine source has never been released. This project **recompiles the retail 32-bit x86 `SS2.exe`
